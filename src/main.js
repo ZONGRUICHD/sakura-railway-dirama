@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { OutlineEffect } from 'three/addons/effects/OutlineEffect.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { buildLandscape } from './landscape.js';
 import { buildStation, buildVillage } from './station.js';
@@ -27,6 +28,13 @@ renderer.localClippingEnabled = true;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.04;
+renderer.info.autoReset = false;
+
+const outlineEffect = new OutlineEffect(renderer, {
+  defaultThickness: 0.0025,
+  defaultColor: new THREE.Color('#30343b').toArray(),
+});
+outlineEffect.autoClear = true;
 
 const camera = new THREE.OrthographicCamera(-20, 20, 16, -16, .1, 150);
 const target = new THREE.Vector3(0, 1.2, 0);
@@ -49,6 +57,24 @@ const station = buildStation(world);
 const village = buildVillage(world);
 const infrastructure = buildInfrastructure(world);
 const train = buildTrain(world);
+
+// Outline closed surfaces; preserve glass, open surfaces and fine instanced details.
+// Clone opt-out materials so shared opaque meshes keep their outlines after batching.
+const unoutlinedMaterials = new Map();
+world.traverse(object => {
+  if (!object.isMesh) return;
+  const configure = original => {
+    if (!object.isInstancedMesh && !original.transparent && original.side !== THREE.DoubleSide) return original;
+    if (!unoutlinedMaterials.has(original)) {
+      const cloned = original.clone();
+      cloned.onBeforeCompile = original.onBeforeCompile;
+      cloned.userData.outlineParameters = { ...original.userData.outlineParameters, visible: false };
+      unoutlinedMaterials.set(original, cloned);
+    }
+    return unoutlinedMaterials.get(original);
+  };
+  object.material = Array.isArray(object.material) ? object.material.map(configure) : configure(object.material);
+});
 
 const inventory = {};
 world.traverse(object => { if (object.name) inventory[object.name] = (inventory[object.name] || 0) + 1; });
@@ -111,6 +137,7 @@ const halo = shadowContext.createRadialGradient(128, 128, 24, 128, 128, 125);
 halo.addColorStop(0, 'rgba(59,81,74,.23)'); halo.addColorStop(.65, 'rgba(59,81,74,.12)'); halo.addColorStop(1, 'rgba(59,81,74,0)');
 shadowContext.fillStyle = halo; shadowContext.fillRect(0, 0, 256, 256);
 const shadow = new THREE.Mesh(new THREE.PlaneGeometry(35, 35), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(shadowCanvas), transparent: true, depthWrite: false }));
+shadow.material.userData.outlineParameters = { visible: false };
 shadow.rotation.x = -Math.PI / 2; shadow.position.y = -1.48; scene.add(shadow);
 
 const clock = new THREE.Clock();
@@ -127,7 +154,8 @@ function renderFrame() {
   train.update(lastState, time);
   infrastructure.update(lastState, time);
   controls.update();
-  renderer.render(scene, camera);
+  renderer.info.reset();
+  outlineEffect.render(scene, camera);
   frames++;
 }
 renderer.setAnimationLoop(renderFrame);
@@ -137,13 +165,13 @@ function resize() {
   const halfHeight = Math.max(16, 18.15 / aspect);
   camera.left = -halfHeight * aspect; camera.right = halfHeight * aspect;
   camera.top = halfHeight; camera.bottom = -halfHeight;
-  camera.updateProjectionMatrix(); renderer.setSize(width, height);
+  camera.updateProjectionMatrix(); outlineEffect.setSize(width, height);
 }
 window.addEventListener('resize', resize); resize();
 
 if (import.meta.env.DEV) {
   window.__diorama = {
-    scene, world, camera, controls, renderer, inventory,
+    scene, world, camera, controls, renderer, outlineEffect, inventory,
     get state() { return { ...lastState, frames, drawCalls: renderer.info.render.calls, triangles: renderer.info.render.triangles }; },
     seek(time) { inspectionTime = time; renderFrame(); return this.state; },
     resume() { simulationTime = inspectionTime ?? simulationTime; inspectionTime = null; },
